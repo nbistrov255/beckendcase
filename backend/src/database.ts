@@ -7,7 +7,6 @@ export async function initDB() {
     driver: sqlite3.Database
   })
 
-  // Включаем FK
   await db.exec('PRAGMA foreign_keys = ON;')
 
   await db.exec(`
@@ -27,6 +26,8 @@ export async function initDB() {
       image_url TEXT,
       price_eur REAL,
       sell_price_eur REAL,
+      rarity TEXT,
+      stock INTEGER DEFAULT -1, -- -1 значит бесконечно, 0 и больше - лимит
       is_active INTEGER DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS cases (
@@ -43,8 +44,8 @@ export async function initDB() {
       item_id TEXT,
       weight REAL,
       rarity TEXT,
-      FOREIGN KEY(case_id) REFERENCES cases(id),
-      FOREIGN KEY(item_id) REFERENCES items(id)
+      FOREIGN KEY(case_id) REFERENCES cases(id) ON DELETE CASCADE,
+      FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS case_claims (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +54,6 @@ export async function initDB() {
       period_key TEXT,
       claimed_at INTEGER
     );
-    -- Добавили поле rarity и image_url в spins для удобства ленты
     CREATE TABLE IF NOT EXISTS spins (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_uuid TEXT,
@@ -65,7 +65,6 @@ export async function initDB() {
       image_url TEXT,
       created_at INTEGER
     );
-    -- Добавили поле rarity в inventory
     CREATE TABLE IF NOT EXISTS inventory (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_uuid TEXT,
@@ -82,14 +81,12 @@ export async function initDB() {
     );
   `)
 
-  // Миграция для старых баз (если колонки нет - добавим, чтобы не было ошибки)
-  try {
-    await db.exec("ALTER TABLE spins ADD COLUMN rarity TEXT;");
-    await db.exec("ALTER TABLE spins ADD COLUMN image_url TEXT;");
-  } catch (e) {}
-  try {
-    await db.exec("ALTER TABLE inventory ADD COLUMN rarity TEXT;");
-  } catch (e) {}
+  // Миграции
+  try { await db.exec("ALTER TABLE items ADD COLUMN rarity TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE items ADD COLUMN stock INTEGER DEFAULT -1;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE spins ADD COLUMN rarity TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE spins ADD COLUMN image_url TEXT;"); } catch (e) {}
+  try { await db.exec("ALTER TABLE inventory ADD COLUMN rarity TEXT;"); } catch (e) {}
 
   return db
 }

@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: cyberhub_db
+    restart: always
+    environment:
+      POSTGRES_USER: cyberhub_user
+      POSTGRES_PASSWORD: cyberhub_secret_password_2025
+      POSTGRES_DB: cyberhub_main
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    container_name: cyberhub_api
+    restart: always
+    env_file:
+      - ./.env
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+
+  frontend:
+    build: ./frontend
+    container_name: cyberhub_ui
+    restart: always
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:

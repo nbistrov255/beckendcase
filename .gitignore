@@ -1,0 +1,25 @@
+# secrets
+.env
+**/.env
+
+# deps
+node_modules
+**/node_modules
+
+# databases
+*.db
+**/*.db
+*.sqlite
+*.sqlite3
+
+# logs / temp
+*.log
+.cache
+.tmp
+tmp
+
+# builds
+dist
+build
+out
+coverage

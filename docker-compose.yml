@@ -7,8 +7,7 @@ services:
       POSTGRES_USER: cyberhub_user
       POSTGRES_PASSWORD: cyberhub_secret_password_2025
       POSTGRES_DB: cyberhub_main
-    ports:
-      - "5432:5432"
+    # Порты удалены для безопасности. Доступ только внутри Docker сети.
     volumes:
       - pgdata:/var/lib/postgresql/data
 

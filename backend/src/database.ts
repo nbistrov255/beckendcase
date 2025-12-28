@@ -1,107 +1,95 @@
-import sqlite3 from "sqlite3";
-import { open, Database } from "sqlite";
-import path from "path";
+import sqlite3 from 'sqlite3'
+import { open } from 'sqlite'
 
-export async function initDB(): Promise<Database> {
-  const dbPath = path.join(__dirname, "../cyberhub.db");
-  
+export async function initDB() {
   const db = await open({
-    filename: dbPath,
+    filename: './cyberhub.db',
     driver: sqlite3.Database
-  });
+  })
 
-  console.log(`[DB] Connected to SQLite at ${dbPath}`);
+  // Включаем FK
+  await db.exec('PRAGMA foreign_keys = ON;')
 
-  // 1. Сессии
   await db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
-      user_uuid TEXT NOT NULL,
+      user_uuid TEXT,
       nickname TEXT,
       created_at INTEGER,
       last_seen_at INTEGER,
       expires_at INTEGER,
       client_access_token TEXT
-    )
-  `);
-
-  // 2. ТОВАРЫ (Items) - Создаются в Админке
-  await db.exec(`
+    );
     CREATE TABLE IF NOT EXISTS items (
       id TEXT PRIMARY KEY,
-      type TEXT NOT NULL,        -- 'skin', 'physical', 'money'
-      title TEXT NOT NULL,
+      type TEXT,
+      title TEXT,
       image_url TEXT,
-      price_eur REAL,            -- Отображаемая цена
-      sell_price_eur REAL,       -- Цена продажи
+      price_eur REAL,
+      sell_price_eur REAL,
       is_active INTEGER DEFAULT 1
-    )
-  `);
-
-  // 3. КЕЙСЫ (Cases) - Создаются в Админке
-  await db.exec(`
+    );
     CREATE TABLE IF NOT EXISTS cases (
-      id TEXT PRIMARY KEY,       -- 'daily_3', 'monthly_50' и т.д.
-      title TEXT NOT NULL,
-      type TEXT NOT NULL,        -- 'daily', 'monthly'
-      threshold_eur REAL NOT NULL,
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      type TEXT,
+      threshold_eur REAL,
       image_url TEXT,
       is_active INTEGER DEFAULT 1
-    )
-  `);
-
-  // 4. СОДЕРЖИМОЕ КЕЙСОВ (Связь)
-  await db.exec(`
+    );
     CREATE TABLE IF NOT EXISTS case_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      case_id TEXT NOT NULL,
-      item_id TEXT NOT NULL,
-      weight INTEGER NOT NULL,
-      rarity TEXT DEFAULT 'common'
-    )
-  `);
-
-  // 5. АНТИ-ФРОД (Клеймы)
-  await db.exec(`
+      case_id TEXT,
+      item_id TEXT,
+      weight REAL,
+      rarity TEXT,
+      FOREIGN KEY(case_id) REFERENCES cases(id),
+      FOREIGN KEY(item_id) REFERENCES items(id)
+    );
     CREATE TABLE IF NOT EXISTS case_claims (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_uuid TEXT NOT NULL,
-      case_id TEXT NOT NULL,
-      period_key TEXT NOT NULL,
-      claimed_at INTEGER,
-      UNIQUE(user_uuid, case_id, period_key)
-    )
-  `);
-
-  // 6. ИНВЕНТАРЬ (Inventory)
-  await db.exec(`
+      user_uuid TEXT,
+      case_id TEXT,
+      period_key TEXT,
+      claimed_at INTEGER
+    );
+    -- Добавили поле rarity и image_url в spins для удобства ленты
+    CREATE TABLE IF NOT EXISTS spins (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_uuid TEXT,
+      case_id TEXT,
+      period_key TEXT,
+      prize_title TEXT,
+      prize_amount_eur REAL,
+      rarity TEXT,
+      image_url TEXT,
+      created_at INTEGER
+    );
+    -- Добавили поле rarity в inventory
     CREATE TABLE IF NOT EXISTS inventory (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_uuid TEXT NOT NULL,
+      user_uuid TEXT,
       item_id TEXT,
       title TEXT,
       type TEXT,
       image_url TEXT,
       amount_eur REAL,
       sell_price_eur REAL,
-      status TEXT DEFAULT 'PENDING', -- 'PENDING', 'SOLD', 'CREDITED'
+      rarity TEXT,
+      status TEXT,
       created_at INTEGER,
       updated_at INTEGER
-    )
-  `);
+    );
+  `)
 
-  // 7. СПИНЫ (История)
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS spins (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_uuid TEXT NOT NULL,
-      case_id TEXT NOT NULL,
-      period_key TEXT NOT NULL,
-      prize_title TEXT,
-      prize_amount_eur REAL,
-      created_at INTEGER
-    )
-  `);
+  // Миграция для старых баз (если колонки нет - добавим, чтобы не было ошибки)
+  try {
+    await db.exec("ALTER TABLE spins ADD COLUMN rarity TEXT;");
+    await db.exec("ALTER TABLE spins ADD COLUMN image_url TEXT;");
+  } catch (e) {}
+  try {
+    await db.exec("ALTER TABLE inventory ADD COLUMN rarity TEXT;");
+  } catch (e) {}
 
-  return db;
+  return db
 }

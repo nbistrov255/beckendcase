@@ -73,44 +73,41 @@ let _serviceTokenExp = 0;
 async function getServiceToken(): Promise<string> {
   if (_serviceToken && Date.now() < _serviceTokenExp) return _serviceToken;
   try {
+    console.log("🔄 Refreshing Service Token...");
     const data = await gqlRequest<{ login: { access_token: string, expires_in: number } }>(`
       mutation Login($input: LoginInput!) { login(input: $input) { access_token expires_in } }
     `, { input: { login: process.env.SMARTSHELL_LOGIN, password: process.env.SMARTSHELL_PASSWORD, company_id: Number(process.env.SMARTSHELL_CLUB_ID) } });
     _serviceToken = data.login.access_token;
     _serviceTokenExp = Date.now() + (data.login.expires_in - 60) * 1000;
+    console.log("✅ Service Token Refreshed");
     return _serviceToken;
-  } catch (e) { console.error("Admin Login Failed"); throw e; }
+  } catch (e) { 
+      console.error("❌ Admin Login Failed (Check .env credentials):", e); 
+      throw e; 
+  }
 }
 
-// --- БАЛАНС (МЕТОД ПЕРЕБОРА) ---
+// --- БАЛАНС ---
 async function getClientBalance(userUuid: string): Promise<number> {
   try {
     const token = await getServiceToken();
-    // Запрашиваем просто список клиентов без фильтров (первую страницу)
-    const data = await gqlRequest<{ clients: { data: { uuid: string, balance: number }[] } }>(`
+    const data = await gqlRequest<{ clients: { data: { uuid: string, deposit: number }[] } }>(`
       query GetAllClients {
         clients {
-          data { uuid balance }
+          data { uuid deposit }
         }
       }
     `, {}, token);
     
-    // Ищем нашего клиента в списке вручную
     const client = data.clients?.data?.find(c => c.uuid === userUuid);
-    
-    if (client) {
-        console.log(`💰 Found Balance for ${userUuid}: ${client.balance} EUR`);
-        return client.balance;
-    } else {
-        console.warn(`⚠️ Client ${userUuid} not found in the first batch of 'clients'. Balance set to 0.`);
-        return 0;
-    }
+    return client ? (client.deposit || 0) : 0;
   } catch (e) {
-    console.error(`⚠️ Failed to fetch balance loop:`, e);
+    console.error(`⚠️ Failed to fetch balance:`, e);
     return 0;
   }
 }
 
+// --- СТАТИСТИКА ---
 async function calculateProgressSafe(userUuid: string) {
   try {
     const token = await getServiceToken();
@@ -119,22 +116,38 @@ async function calculateProgressSafe(userUuid: string) {
     `, { uuid: userUuid }, token);
     
     const items = data.getPaymentsByClientId?.data || [];
+    
     let daily = 0, monthly = 0;
     const todayKey = getRigaDayKey();
     const monthKey = getRigaMonthKey();
 
     for (const p of items) {
-      const isDeposit = p.items?.some((i: any) => i.type === "DEPOSIT") || String(p.title).toLowerCase().includes("пополнение");
-      if (!isDeposit || p.is_refunded) continue;
+      if (p.is_refunded) continue;
       const val = Number(p.sum) || Number(p.amount) || 0;
       if (val <= 0) continue;
+
+      const title = String(p.title || "").toLowerCase();
+      const isDeposit = 
+        title.includes("пополнение") || 
+        title.includes("deposit") || 
+        title.includes("top-up") || 
+        (p.items && Array.isArray(p.items) && p.items.some((i: any) => i.type === "DEPOSIT"));
+
+      if (!isDeposit) continue;
+
       const dateStr = normalizeDatePart(p.created_at);
       if (!dateStr) continue;
+
       if (dateStr === todayKey) daily += val;
       if (dateStr.startsWith(monthKey)) monthly += val;
     }
+    
+    console.log(`[STATS] Calculated for ${userUuid}: Daily=${daily}, Monthly=${monthly}`);
     return { daily: Math.round(daily * 100) / 100, monthly: Math.round(monthly * 100) / 100 };
-  } catch (e) { return { daily: 0, monthly: 0 }; }
+  } catch (e) { 
+    console.error("[STATS] Error calculating (returning 0):", e);
+    return { daily: 0, monthly: 0 }; 
+  }
 }
 
 async function requireSession(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -165,9 +178,7 @@ app.get("/api/drops/recent", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// --- ITEMS (ИСПРАВЛЕНО ОТОБРАЖЕНИЕ) ---
 app.post("/api/admin/items", async (req, res) => {
-  console.log("📦 [ADD ITEM]", req.body);
   try {
     let { id, type, title, image_url, price_eur, sell_price_eur, rarity, stock } = req.body;
     if (!sell_price_eur) sell_price_eur = price_eur;
@@ -175,7 +186,6 @@ app.post("/api/admin/items", async (req, res) => {
     if (stock === undefined || stock === '') stock = -1;
     const newItemId = id || crypto.randomUUID();
     
-    // ЯВНО УКАЗЫВАЕМ is_active = 1
     await db.run(`
         INSERT INTO items (id, type, title, image_url, price_eur, sell_price_eur, rarity, stock, is_active) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1) 
@@ -183,7 +193,7 @@ app.post("/api/admin/items", async (req, res) => {
     `, newItemId, type, title, image_url, price_eur, sell_price_eur, rarity, stock);
     
     res.json({ success: true, item_id: newItemId });
-  } catch (e: any) { console.error("ADD ITEM ERROR:", e); res.status(500).json({ error: e.message }); }
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/api/admin/items/:id", async (req, res) => {
@@ -199,38 +209,100 @@ app.delete("/api/admin/items/:id", async (req, res) => {
 
 app.get("/api/admin/items", async (req, res) => {
   try {
-      // УБРАЛИ WHERE is_active = 1 на всякий случай, чтобы видеть все
       const items = await db.all("SELECT * FROM items ORDER BY title ASC");
-      console.log(`📤 Sending ${items.length} items to frontend`); // <-- СМОТРИ СЮДА В ЛОГАХ
       res.json({ success: true, items });
   } catch (e: any) {
-      console.error("Load Items Error:", e);
       res.status(500).json({ error: "Failed to load items" });
   }
 });
 
+// --- API КЕЙСОВ ---
 app.post("/api/admin/cases", async (req, res) => {
   try {
-    const { id, title, type, threshold_eur, image_url, items } = req.body;
+    let { id, title, nameEn, type, threshold_eur, threshold, image_url, image, items, contents, status } = req.body;
+    
+    // Адаптация данных
+    if (!title && nameEn) title = nameEn;
+    if ((threshold_eur === undefined || threshold_eur === null) && threshold !== undefined) threshold_eur = threshold;
+    if (!image_url && image) image_url = image;
+    
+    // Статус в is_active
+    const is_active = (status === 'published') ? 1 : 0;
+
+    if ((!items || items.length === 0) && contents && Array.isArray(contents)) {
+      items = contents.map((c: any) => ({
+        item_id: c.itemId,
+        weight: c.dropChance,
+        rarity: c.item?.rarity || 'common'
+      }));
+    }
+
+    const caseId = id || crypto.randomUUID();
+
     await db.run("BEGIN TRANSACTION");
-    await db.run(`INSERT INTO cases (id, title, type, threshold_eur, image_url) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, type=excluded.type, threshold_eur=excluded.threshold_eur, image_url=excluded.image_url`, id, title, type, threshold_eur, image_url);
-    await db.run("DELETE FROM case_items WHERE case_id = ?", id);
+    
+    // ВАЖНО: Используем ON CONFLICT для обновления существующего кейса по ID
+    await db.run(`
+      INSERT INTO cases (id, title, type, threshold_eur, image_url, is_active) 
+      VALUES (?, ?, ?, ?, ?, ?) 
+      ON CONFLICT(id) DO UPDATE SET title=excluded.title, type=excluded.type, threshold_eur=excluded.threshold_eur, image_url=excluded.image_url, is_active=excluded.is_active
+    `, caseId, title, type, threshold_eur, image_url, is_active);
+    
+    await db.run("DELETE FROM case_items WHERE case_id = ?", caseId);
+    
     if (items && Array.isArray(items)) {
       for (const item of items) {
-        await db.run(`INSERT INTO case_items (case_id, item_id, weight, rarity) VALUES (?, ?, ?, ?)`, id, item.item_id, item.weight, item.rarity);
+        await db.run(`INSERT INTO case_items (case_id, item_id, weight, rarity) VALUES (?, ?, ?, ?)`, caseId, item.item_id, item.weight, item.rarity);
       }
     }
+    
     await db.run("COMMIT");
-    res.json({ success: true, case_id: id });
-  } catch (e: any) { await db.run("ROLLBACK"); res.status(500).json({ error: e.message }); }
+    
+    res.json({ 
+        success: true, 
+        id: caseId, 
+        title, 
+        type, 
+        threshold: threshold_eur, 
+        image: image_url,         
+        status: is_active ? 'published' : 'draft' 
+    });
+  } catch (e: any) { 
+    console.error("CREATE CASE ERROR:", e);
+    await db.run("ROLLBACK"); 
+    res.status(500).json({ error: e.message }); 
+  }
+});
+
+// Удаление кейса
+app.delete("/api/admin/cases/:id", async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.run("DELETE FROM cases WHERE id = ?", id);
+        await db.run("DELETE FROM case_items WHERE case_id = ?", id);
+        res.json({ success: true });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get("/api/admin/cases", async (req, res) => {
-  const cases = await db.all("SELECT * FROM cases WHERE is_active = 1");
+  const cases = await db.all("SELECT * FROM cases");
   const result = [];
   for (const c of cases) {
     const items = await db.all(`SELECT ci.item_id, ci.weight, ci.rarity, i.title, i.image_url FROM case_items ci JOIN items i ON ci.item_id = i.id WHERE ci.case_id = ?`, c.id);
-    result.push({ ...c, items });
+    result.push({ 
+        ...c, 
+        items,
+        threshold: c.threshold_eur, 
+        image: c.image_url,
+        status: c.is_active ? 'published' : 'draft',
+        contents: items.map((i: any) => ({
+            itemId: i.item_id,
+            dropChance: i.weight,
+            item: { ...i, id: i.item_id, image: i.image_url, nameEn: i.title }
+        }))
+    });
   }
   res.json({ success: true, cases: result });
 });
@@ -248,27 +320,54 @@ app.post("/api/auth/session", async (req, res) => {
     await db.run("DELETE FROM sessions WHERE user_uuid = ?", uuid);
     await db.run(`INSERT INTO sessions (token, user_uuid, nickname, created_at, last_seen_at, expires_at, client_access_token) VALUES (?, ?, ?, ?, ?, ?, ?)`, sessionToken, uuid, nickname, now, now, now + 86400000, clientToken);
     
-    const [progress, balance] = await Promise.all([calculateProgressSafe(uuid), getClientBalance(uuid)]);
-    console.log(`[AUTH] Success for ${nickname}. Balance: ${balance}`);
-
-    res.json({ success: true, session_token: sessionToken, profile: { uuid, nickname, balance: balance, dailySum: progress.daily, monthlySum: progress.monthly, cases: [] } });
+    let progress = { daily: 0, monthly: 0 };
+    let balance = 0;
+    try {
+        [progress, balance] = await Promise.all([calculateProgressSafe(uuid), getClientBalance(uuid)]);
+    } catch (e) {
+        console.error("Auth stats loading failed:", e);
+    }
+    
+    res.json({ success: true, session_token: sessionToken, profile: { uuid, nickname, balance, dailySum: progress.daily, monthlySum: progress.monthly, cases: [] } });
   } catch (e: any) { 
-    console.error("[AUTH] Failed:", e.message); 
     res.status(401).json({ success: false, error: "Invalid credentials" }); 
   }
 });
 
+// --- ПРОФИЛЬ (ЗДЕСЬ МЫ ВКЛЮЧИЛИ ВСЕ КЕЙСЫ) ---
 app.get("/api/profile", requireSession, async (req, res) => {
   const { user_uuid, nickname } = res.locals.session;
-  const [progress, balance] = await Promise.all([calculateProgressSafe(user_uuid), getClientBalance(user_uuid)]);
-  const casesDB = await db.all("SELECT * FROM cases WHERE is_active = 1");
-  const claims = await db.all(`SELECT case_id FROM case_claims WHERE user_uuid = ? AND (period_key = ? OR period_key = ?)`, user_uuid, getRigaDayKey(), getRigaMonthKey());
+  
+  // ЗАГРУЖАЕМ ВСЕ КЕЙСЫ (даже если is_active=0, чтобы ты их увидел)
+  const casesDB = await db.all("SELECT * FROM cases"); 
+  
+  let progress = { daily: 0, monthly: 0 };
+  let balance = 0;
+  
+  try {
+      [progress, balance] = await Promise.all([calculateProgressSafe(user_uuid), getClientBalance(user_uuid)]);
+  } catch (e) {
+      console.error("Profile stats sync failed (ignoring):", e);
+  }
+
+  const todayKey = getRigaDayKey();
+  const monthKey = getRigaMonthKey();
+  const claims = await db.all(`SELECT case_id FROM case_claims WHERE user_uuid = ? AND (period_key = ? OR period_key = ?)`, user_uuid, todayKey, monthKey);
   const claimedIds = new Set(claims.map((c: any) => c.case_id));
-  const openedToday = claims.filter((c: any) => c.period_key === getRigaDayKey()).length;
+  const openedToday = claims.filter((c: any) => c.period_key === todayKey).length;
+  
   const cases = casesDB.map((cfg: any) => {
     const current = cfg.type === "daily" ? progress.daily : progress.monthly;
-    return { ...cfg, progress: current, available: current >= cfg.threshold_eur && !claimedIds.has(cfg.id), is_claimed: claimedIds.has(cfg.id) };
+    return { 
+        ...cfg, 
+        threshold: cfg.threshold_eur,
+        image: cfg.image_url,
+        progress: current, 
+        available: current >= cfg.threshold_eur && !claimedIds.has(cfg.id), 
+        is_claimed: claimedIds.has(cfg.id) 
+    };
   });
+  
   res.json({ success: true, profile: { uuid: user_uuid, nickname, balance, dailySum: progress.daily, monthlySum: progress.monthly, dailyStats: { deposited: progress.daily, opened: openedToday }, monthlyStats: { deposited: progress.monthly }, cases } });
 });
 
@@ -294,13 +393,17 @@ app.post("/api/cases/open", requireSession, async (req, res) => {
     if (!caseMeta) return res.status(404).json({ error: "Case not found" });
     const periodKey = caseMeta.type === "daily" ? getRigaDayKey() : getRigaMonthKey();
     if (await db.get("SELECT id FROM case_claims WHERE user_uuid=? AND case_id=? AND period_key=?", user_uuid, caseId, periodKey)) return res.status(400).json({ error: "Already opened" });
+    
     const progress = await calculateProgressSafe(user_uuid);
     if ((caseMeta.type === "daily" ? progress.daily : progress.monthly) < caseMeta.threshold_eur) return res.status(403).json({ error: "Not enough deposit" });
+    
     const caseItems = await db.all(`SELECT ci.*, i.stock FROM case_items ci JOIN items i ON ci.item_id = i.id WHERE ci.case_id = ? AND (i.stock = -1 OR i.stock > 0)`, caseId);
     if (!caseItems.length) return res.status(500).json({ error: "Case empty" });
+    
     let rnd = Math.random() * caseItems.reduce((acc: number, i: any) => acc + i.weight, 0);
     const selectedLink = caseItems.find((i: any) => (rnd -= i.weight) <= 0) || caseItems[0];
     const prizeItem = await db.get("SELECT * FROM items WHERE id = ?", selectedLink.item_id);
+    
     await db.run("BEGIN TRANSACTION");
     if (prizeItem.stock > 0) await db.run("UPDATE items SET stock = stock - 1 WHERE id = ?", prizeItem.id);
     await db.run("INSERT INTO case_claims (user_uuid, case_id, period_key, claimed_at) VALUES (?, ?, ?, ?)", user_uuid, caseId, periodKey, Date.now());

@@ -217,16 +217,16 @@ app.get("/api/admin/items", async (req, res) => {
 });
 
 // --- API КЕЙСОВ ---
-app.post("/api/admin/cases", async (req, res) => {
+// Handler для сохранения и обновления кейса
+const saveCaseHandler = async (req: any, res: any) => {
   try {
     let { id, title, nameEn, type, threshold_eur, threshold, image_url, image, items, contents, status } = req.body;
     
-    // Адаптация данных
+    if (req.params.id) id = req.params.id;
     if (!title && nameEn) title = nameEn;
     if ((threshold_eur === undefined || threshold_eur === null) && threshold !== undefined) threshold_eur = threshold;
     if (!image_url && image) image_url = image;
     
-    // Статус в is_active
     const is_active = (status === 'published') ? 1 : 0;
 
     if ((!items || items.length === 0) && contents && Array.isArray(contents)) {
@@ -240,8 +240,6 @@ app.post("/api/admin/cases", async (req, res) => {
     const caseId = id || crypto.randomUUID();
 
     await db.run("BEGIN TRANSACTION");
-    
-    // ВАЖНО: Используем ON CONFLICT для обновления существующего кейса по ID
     await db.run(`
       INSERT INTO cases (id, title, type, threshold_eur, image_url, is_active) 
       VALUES (?, ?, ?, ?, ?, ?) 
@@ -255,31 +253,27 @@ app.post("/api/admin/cases", async (req, res) => {
         await db.run(`INSERT INTO case_items (case_id, item_id, weight, rarity) VALUES (?, ?, ?, ?)`, caseId, item.item_id, item.weight, item.rarity);
       }
     }
-    
     await db.run("COMMIT");
     
-    res.json({ 
-        success: true, 
-        id: caseId, 
-        title, 
-        type, 
-        threshold: threshold_eur, 
-        image: image_url,         
-        status: is_active ? 'published' : 'draft' 
-    });
+    console.log(`📦 [CASE SAVED] ID: ${caseId}, Title: ${title}, Type: ${type}`);
+    
+    res.json({ success: true, id: caseId });
   } catch (e: any) { 
-    console.error("CREATE CASE ERROR:", e);
+    console.error("SAVE CASE ERROR:", e);
     await db.run("ROLLBACK"); 
     res.status(500).json({ error: e.message }); 
   }
-});
+};
 
-// Удаление кейса
+app.post("/api/admin/cases", saveCaseHandler);
+app.put("/api/admin/cases/:id", saveCaseHandler);
+
 app.delete("/api/admin/cases/:id", async (req, res) => {
     try {
         const { id } = req.params;
         await db.run("DELETE FROM cases WHERE id = ?", id);
         await db.run("DELETE FROM case_items WHERE case_id = ?", id);
+        console.log(`🗑️ [DELETE CASE] ID: ${id}`);
         res.json({ success: true });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
@@ -334,11 +328,11 @@ app.post("/api/auth/session", async (req, res) => {
   }
 });
 
-// --- ПРОФИЛЬ (ЗДЕСЬ МЫ ВКЛЮЧИЛИ ВСЕ КЕЙСЫ) ---
+// --- ПРОФИЛЬ (С ЛОГАМИ) ---
 app.get("/api/profile", requireSession, async (req, res) => {
   const { user_uuid, nickname } = res.locals.session;
   
-  // ЗАГРУЖАЕМ ВСЕ КЕЙСЫ (даже если is_active=0, чтобы ты их увидел)
+  // ЗАГРУЖАЕМ ВСЕ КЕЙСЫ
   const casesDB = await db.all("SELECT * FROM cases"); 
   
   let progress = { daily: 0, monthly: 0 };
@@ -347,7 +341,7 @@ app.get("/api/profile", requireSession, async (req, res) => {
   try {
       [progress, balance] = await Promise.all([calculateProgressSafe(user_uuid), getClientBalance(user_uuid)]);
   } catch (e) {
-      console.error("Profile stats sync failed (ignoring):", e);
+      console.error("Profile stats sync failed:", e);
   }
 
   const todayKey = getRigaDayKey();
@@ -368,6 +362,15 @@ app.get("/api/profile", requireSession, async (req, res) => {
     };
   });
   
+  // --- ЛОГ ОТПРАВКИ ---
+  console.log(`📤 [PROFILE] Sending ${cases.length} cases to frontend for ${nickname}.`);
+  if (cases.length > 0) {
+      console.log(`   Sample Case: Title="${cases[0].title}", Type="${cases[0].type}", Image="${cases[0].image}"`);
+  } else {
+      console.warn(`   ⚠️ WARNING: Cases list is EMPTY!`);
+  }
+  // --------------------
+
   res.json({ success: true, profile: { uuid: user_uuid, nickname, balance, dailySum: progress.daily, monthlySum: progress.monthly, dailyStats: { deposited: progress.daily, opened: openedToday }, monthlyStats: { deposited: progress.monthly }, cases } });
 });
 

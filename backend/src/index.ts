@@ -48,9 +48,8 @@ async function gqlRequest<T>(query: string, variables: any = {}, token?: string)
   if (token) headers["Authorization"] = `Bearer ${token}`;
   
   try {
-    // Таймаут 5 секунд, чтобы сайт не вис
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const timeoutId = setTimeout(() => controller.abort(), 6000); // 6 сек таймаут
 
     const res = await fetch(url, { 
         method: "POST", 
@@ -60,32 +59,23 @@ async function gqlRequest<T>(query: string, variables: any = {}, token?: string)
     });
     
     clearTimeout(timeoutId);
-
-    // Сначала читаем текст! Это спасет от падения.
     const text = await res.text();
 
     if (!res.ok) {
-        console.error(`SmartShell HTTP Error ${res.status}:`, text.slice(0, 200));
+        console.error(`SmartShell HTTP ${res.status}:`, text.slice(0, 100));
         throw new Error(`SmartShell HTTP ${res.status}`);
     }
 
     try {
         const json = JSON.parse(text);
-        if (json.errors) {
-            console.error("SmartShell GQL Errors:", JSON.stringify(json.errors));
-            throw new Error(json.errors[0]?.message || "GraphQL Error");
-        }
+        if (json.errors) throw new Error(json.errors[0]?.message || "GraphQL Error");
         return json.data;
     } catch (e) {
-        console.error("SmartShell Invalid JSON:", text.slice(0, 200)); // Покажет, что пришло на самом деле
+        console.error("SmartShell Invalid JSON Response:", text.slice(0, 100));
         throw new Error("Invalid response from SmartShell");
     }
   } catch (e: any) {
-    if (e.name === 'AbortError') {
-        console.error("SmartShell Request Timed Out (5s)");
-        throw new Error("SmartShell Timeout");
-    }
-    console.error("SmartShell Request Failed:", e.message);
+    console.error("GQL Request Failed:", e.message);
     throw e;
   }
 }
@@ -99,34 +89,27 @@ async function getServiceToken(): Promise<string> {
         mutation Login($input: LoginInput!) { login(input: $input) { access_token expires_in } }
     `, { input: { login: process.env.SMARTSHELL_LOGIN, password: process.env.SMARTSHELL_PASSWORD, company_id: Number(process.env.SMARTSHELL_CLUB_ID) } });
     
-    if (!data?.login) throw new Error("No login data returned");
-    
+    if (!data?.login) throw new Error("No login data");
     _serviceToken = data.login.access_token;
     _serviceTokenExp = Date.now() + (data.login.expires_in - 60) * 1000;
     return _serviceToken;
   } catch (e) {
-    console.error("Failed to get service token:", e);
+    console.error("Service Token Error:", e);
     throw e;
   }
 }
 
-// --- REAL BALANCE & STATS ---
+// --- BALANCE & STATS ---
 async function getClientBalance(userUuid: string): Promise<number> {
   try {
     const token = await getServiceToken();
     const data = await gqlRequest<{ clients: { data: { uuid: string, deposit: number }[] } }>(`
-      query GetAllClients {
-        clients(page: 1, first: 5000) { 
-          data { uuid deposit }
-        }
-      }
+      query GetAllClients { clients(page: 1, first: 5000) { data { uuid deposit } } }
     `, {}, token);
-    
     const client = data.clients?.data?.find(c => c.uuid === userUuid);
     return client ? (client.deposit || 0) : 0;
   } catch (e) {
-    console.error(`⚠️ Failed to fetch balance (returning 0)`);
-    return 0; // Не роняем сайт, возвращаем 0
+    return 0; // Возвращаем 0 при ошибке, чтобы сайт работал
   }
 }
 
@@ -138,7 +121,6 @@ async function calculateProgressSafe(userUuid: string) {
     `, { uuid: userUuid }, token);
     
     const items = data.getPaymentsByClientId?.data || [];
-    
     let daily = 0, monthly = 0;
     const todayKey = getRigaDayKey();
     const monthKey = getRigaMonthKey();
@@ -147,36 +129,24 @@ async function calculateProgressSafe(userUuid: string) {
       if (p.is_refunded) continue;
       const val = Number(p.sum) || Number(p.amount) || 0;
       if (val <= 0) continue;
-
       const title = String(p.title || "").toLowerCase();
-      const isDeposit = 
-        title.includes("пополнение") || 
-        title.includes("deposit") || 
-        title.includes("top-up") || 
-        (p.items && Array.isArray(p.items) && p.items.some((i: any) => i.type === "DEPOSIT"));
-
+      const isDeposit = title.includes("пополнение") || title.includes("deposit") || title.includes("top-up") || (p.items && p.items.some((i: any) => i.type === "DEPOSIT"));
       if (!isDeposit) continue;
-
       const dateStr = normalizeDatePart(p.created_at);
       if (!dateStr) continue;
-
       if (dateStr === todayKey) daily += val;
       if (dateStr.startsWith(monthKey)) monthly += val;
     }
-    
     return { daily: Math.round(daily * 100) / 100, monthly: Math.round(monthly * 100) / 100 };
-  } catch (e) { 
-    console.error("[STATS] Error calculating (returning 0)");
-    return { daily: 0, monthly: 0 }; 
-  }
+  } catch (e) { return { daily: 0, monthly: 0 }; }
 }
 
 async function addClientDeposit(userUuid: string, amount: number) {
-    console.log(`💰 [MOCK] Adding ${amount} EUR to ${userUuid} in SmartShell`);
+    console.log(`💰 [MOCK] Adding ${amount} EUR to ${userUuid}`);
+    // Здесь будет реальный вызов API SmartShell для начисления
     return true; 
 }
 
-// Расчет уровней
 function calculateLevel(xp: number) {
     const baseXP = 100;
     let level = 1;
@@ -193,7 +163,7 @@ function calculateLevel(xp: number) {
 async function requireSession(req: express.Request, res: express.Response, next: express.NextFunction) {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "No token" });
-  if (!db) return res.status(500).json({ error: "DB not ready" }); // Защита от старта без БД
+  if (!db) return res.status(500).json({ error: "DB not ready" });
   
   const session = await db.get("SELECT * FROM sessions WHERE token = ?", token);
   if (!session) return res.status(401).json({ error: "Invalid session" });
@@ -205,12 +175,11 @@ async function requireSession(req: express.Request, res: express.Response, next:
 
 // === ROUTES ===
 
+// AUTH
 app.post("/api/auth/session", async (req, res) => {
   try {
     const { login, password } = req.body;
     const authData = await gqlRequest<{ clientLogin: { access_token: string } }>(`mutation CL($i: ClientLoginInput!) { clientLogin(input: $i) { access_token } }`, { i: { login, password } });
-    
-    if (!authData?.clientLogin?.access_token) throw new Error("No client token");
     const clientToken = authData.clientLogin.access_token;
     
     const meData = await gqlRequest<{ clientMe: { uuid: string, nickname: string } }>(`query { clientMe { uuid nickname } }`, {}, clientToken);
@@ -223,26 +192,23 @@ app.post("/api/auth/session", async (req, res) => {
     
     res.json({ success: true, session_token: sessionToken });
   } catch (e: any) { 
-    console.error("Auth error:", e);
-    res.status(401).json({ success: false, error: "Invalid credentials or API error" }); 
+    res.status(401).json({ success: false, error: "Invalid credentials" }); 
   }
 });
 
-// Профиль пользователя
+// PROFILE
 app.get("/api/profile", requireSession, async (req, res) => {
     const session = res.locals.session;
     const { user_uuid, nickname } = session;
 
-    // 1. Получаем реальный баланс с защитой от сбоев
     let progress = { daily: 0, monthly: 0 };
     let balance = 0;
     try {
         [progress, balance] = await Promise.all([calculateProgressSafe(user_uuid), getClientBalance(user_uuid)]);
     } catch (e) {
-        console.error("Stats sync failed completely (using 0):", e);
+        console.error("Stats sync failed (using zeros)");
     }
 
-    // 2. Получаем кейсы
     const casesDB = await db.all("SELECT * FROM cases");
     const todayKey = getRigaDayKey();
     const monthKey = getRigaMonthKey();
@@ -280,8 +246,7 @@ app.get("/api/profile", requireSession, async (req, res) => {
     });
 });
 
-// --- ОСТАЛЬНЫЕ РОУТЫ ---
-
+// STATS
 app.get("/api/stats/public", async (req, res) => {
     try {
         const stats = await db.get("SELECT COUNT(DISTINCT user_uuid) as unique_users, COUNT(*) as total_spins FROM spins");
@@ -292,8 +257,7 @@ app.get("/api/stats/public", async (req, res) => {
 app.get("/api/drops/recent", async (req, res) => {
     try {
         const drops = await db.all(`
-            SELECT s.id, s.prize_title as item_name, s.image_url as image, s.rarity, 
-                s.created_at as timestamp, s.user_uuid 
+            SELECT s.id, s.prize_title as item_name, s.image_url as image, s.rarity, s.created_at as timestamp, s.user_uuid 
             FROM spins s ORDER BY s.created_at DESC LIMIT 20
         `);
         for (let drop of drops) {
@@ -304,12 +268,43 @@ app.get("/api/drops/recent", async (req, res) => {
     } catch (e) { res.json({ success: false, drops: [] }); }
 });
 
+// --- ADMIN ITEMS (ВОССТАНОВЛЕНО!) ---
 app.get("/api/admin/items", requireSession, async (req, res) => {
-    const items = await db.all("SELECT * FROM items");
+    const items = await db.all("SELECT * FROM items ORDER BY title ASC");
     res.json({ success: true, items });
 });
 
-// --- CRUD ДЛЯ КЕЙСОВ (Admin) ---
+app.post("/api/admin/items", requireSession, async (req, res) => {
+    try {
+        let { id, type, title, image_url, price_eur, sell_price_eur, rarity, stock } = req.body;
+        if (!sell_price_eur) sell_price_eur = price_eur;
+        if (!rarity) rarity = 'common';
+        if (stock === undefined || stock === '') stock = -1;
+        
+        const itemId = id || crypto.randomUUID();
+        
+        await db.run(`
+            INSERT INTO items (id, type, title, image_url, price_eur, sell_price_eur, rarity, stock, is_active) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1) 
+            ON CONFLICT(id) DO UPDATE SET type=excluded.type, title=excluded.title, image_url=excluded.image_url, price_eur=excluded.price_eur, sell_price_eur=excluded.sell_price_eur, rarity=excluded.rarity, stock=excluded.stock
+        `, itemId, type, title, image_url, price_eur, sell_price_eur, rarity, stock);
+        
+        res.json({ success: true, item_id: itemId });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/admin/items/:id", requireSession, async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.run("BEGIN TRANSACTION");
+        await db.run("DELETE FROM case_items WHERE item_id = ?", id);
+        await db.run("DELETE FROM items WHERE id = ?", id);
+        await db.run("COMMIT");
+        res.json({ success: true });
+    } catch (e: any) { await db.run("ROLLBACK"); res.status(500).json({ error: e.message }); }
+});
+
+// --- ADMIN CASES (ВОССТАНОВЛЕНО!) ---
 const saveCaseHandler = async (req: any, res: any) => {
   try {
     let { id, title, nameEn, type, threshold_eur, threshold, image_url, image, items, contents, status } = req.body;
@@ -318,9 +313,9 @@ const saveCaseHandler = async (req: any, res: any) => {
     if (!title && nameEn) title = nameEn;
     if ((threshold_eur === undefined || threshold_eur === null) && threshold !== undefined) threshold_eur = threshold;
     if (!image_url && image) image_url = image;
-    
     const is_active = (status === 'published') ? 1 : 0;
-
+    
+    // Адаптация содержимого
     if ((!items || items.length === 0) && contents && Array.isArray(contents)) {
       items = contents.map((c: any) => ({
         item_id: c.itemId,
@@ -358,13 +353,9 @@ app.put("/api/admin/cases/:id", requireSession, saveCaseHandler);
 
 app.delete("/api/admin/cases/:id", requireSession, async (req, res) => {
     try {
-        const { id } = req.params;
-        await db.run("DELETE FROM cases WHERE id = ?", id);
-        await db.run("DELETE FROM case_items WHERE case_id = ?", id);
+        await db.run("DELETE FROM cases WHERE id = ?", req.params.id);
         res.json({ success: true });
-    } catch (e: any) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/api/admin/cases", requireSession, async (req, res) => {
@@ -388,6 +379,7 @@ app.get("/api/admin/cases", requireSession, async (req, res) => {
   res.json({ success: true, cases: result });
 });
 
+// PUBLIC CASE
 app.get("/api/cases/:id", async (req, res) => {
     const { id } = req.params;
     const caseData = await db.get("SELECT * FROM cases WHERE id = ?", id);
@@ -398,6 +390,7 @@ app.get("/api/cases/:id", async (req, res) => {
     res.json({ success: true, case: caseData, contents });
 });
 
+// CASE OPEN
 app.post("/api/cases/open", requireSession, async (req, res) => {
     try {
         const { user_uuid } = res.locals.session;
@@ -429,6 +422,7 @@ app.post("/api/cases/open", requireSession, async (req, res) => {
     } catch (e: any) { await db.run("ROLLBACK"); res.status(500).json({ error: e.message }); }
 });
 
+// INVENTORY & REQUESTS
 app.get("/api/inventory", requireSession, async (req, res) => {
     const items = await db.all("SELECT * FROM inventory WHERE user_uuid = ? AND status IN ('available', 'processing') ORDER BY created_at DESC", res.locals.session.user_uuid);
     res.json({ items });
@@ -436,12 +430,11 @@ app.get("/api/inventory", requireSession, async (req, res) => {
 
 app.post("/api/inventory/sell", requireSession, async (req, res) => {
     const { inventory_id } = req.body;
-    const { user_uuid } = res.locals.session;
-    const item = await db.get("SELECT * FROM inventory WHERE id = ? AND user_uuid = ?", inventory_id, user_uuid);
+    const item = await db.get("SELECT * FROM inventory WHERE id = ? AND user_uuid = ?", inventory_id, res.locals.session.user_uuid);
     if (!item || item.status !== 'available') return res.status(400).json({ error: "Item not available" });
     if (item.type === 'money') return res.status(400).json({ error: "Money cannot be sold" });
 
-    await addClientDeposit(user_uuid, item.sell_price_eur);
+    await addClientDeposit(res.locals.session.user_uuid, item.sell_price_eur);
     await db.run("UPDATE inventory SET status = 'sold', updated_at = ? WHERE id = ?", Date.now(), inventory_id);
     res.json({ success: true, sold_amount: item.sell_price_eur });
 });
@@ -472,45 +465,34 @@ app.post("/api/inventory/claim", requireSession, async (req, res) => {
 });
 
 app.post("/api/user/tradelink", requireSession, async (req, res) => {
-    const { trade_link } = req.body;
-    const { user_uuid } = res.locals.session;
-    await db.run(`INSERT INTO user_settings (user_uuid, trade_link) VALUES (?, ?) ON CONFLICT(user_uuid) DO UPDATE SET trade_link = excluded.trade_link`, user_uuid, trade_link);
+    await db.run(`INSERT INTO user_settings (user_uuid, trade_link) VALUES (?, ?) ON CONFLICT(user_uuid) DO UPDATE SET trade_link = excluded.trade_link`, res.locals.session.user_uuid, req.body.trade_link);
     res.json({ success: true });
 });
 
+// ADMIN REQUESTS
 app.get("/api/admin/requests", requireSession, async (req, res) => {
     const requests = await db.all(`SELECT r.*, u.nickname as user_nickname, s.trade_link FROM requests r LEFT JOIN sessions u ON r.user_uuid = u.user_uuid LEFT JOIN user_settings s ON r.user_uuid = s.user_uuid ORDER BY r.created_at DESC`);
     res.json(requests);
 });
 
 app.post("/api/admin/requests/:id/approve", requireSession, async (req, res) => {
-    const { id } = req.params;
-    await db.run("BEGIN TRANSACTION");
-    await db.run("UPDATE requests SET status = 'approved', updated_at = ? WHERE id = ?", Date.now(), id);
-    const reqData = await db.get("SELECT inventory_id FROM requests WHERE id = ?", id);
+    await db.run("UPDATE requests SET status = 'approved', updated_at = ? WHERE id = ?", Date.now(), req.params.id);
+    const reqData = await db.get("SELECT inventory_id FROM requests WHERE id = ?", req.params.id);
     await db.run("UPDATE inventory SET status = 'received', updated_at = ? WHERE id = ?", Date.now(), reqData.inventory_id);
-    await db.run("COMMIT");
     res.json({ success: true });
 });
 
 app.post("/api/admin/requests/:id/deny", requireSession, async (req, res) => {
-    const { id } = req.params;
-    const { comment } = req.body;
-    await db.run("BEGIN TRANSACTION");
-    await db.run("UPDATE requests SET status = 'denied', admin_comment = ?, updated_at = ? WHERE id = ?", comment, Date.now(), id);
-    const reqData = await db.get("SELECT inventory_id FROM requests WHERE id = ?", id);
+    await db.run("UPDATE requests SET status = 'denied', admin_comment = ?, updated_at = ? WHERE id = ?", req.body.comment, Date.now(), req.params.id);
+    const reqData = await db.get("SELECT inventory_id FROM requests WHERE id = ?", req.params.id);
     await db.run("UPDATE inventory SET status = 'available', updated_at = ? WHERE id = ?", Date.now(), reqData.inventory_id);
-    await db.run("COMMIT");
     res.json({ success: true });
 });
 
 app.post("/api/admin/requests/:id/return", requireSession, async (req, res) => {
-    const { id } = req.params;
-    await db.run("BEGIN TRANSACTION");
-    await db.run("UPDATE requests SET status = 'returned', updated_at = ? WHERE id = ?", Date.now(), id);
-    const reqData = await db.get("SELECT inventory_id FROM requests WHERE id = ?", id);
+    await db.run("UPDATE requests SET status = 'returned', updated_at = ? WHERE id = ?", Date.now(), req.params.id);
+    const reqData = await db.get("SELECT inventory_id FROM requests WHERE id = ?", req.params.id);
     await db.run("UPDATE inventory SET status = 'available', updated_at = ? WHERE id = ?", Date.now(), reqData.inventory_id);
-    await db.run("COMMIT");
     res.json({ success: true });
 });
 

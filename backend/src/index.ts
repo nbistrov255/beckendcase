@@ -222,7 +222,10 @@ const saveCaseHandler = async (req: any, res: any) => {
   try {
     let { id, title, nameEn, type, threshold_eur, threshold, image_url, image, items, contents, status } = req.body;
     
+    // Если id пришел в URL (PUT), берем его оттуда
     if (req.params.id) id = req.params.id;
+
+    // Адаптация данных
     if (!title && nameEn) title = nameEn;
     if ((threshold_eur === undefined || threshold_eur === null) && threshold !== undefined) threshold_eur = threshold;
     if (!image_url && image) image_url = image;
@@ -328,11 +331,11 @@ app.post("/api/auth/session", async (req, res) => {
   }
 });
 
-// --- ПРОФИЛЬ (С ЛОГАМИ) ---
+// --- ПРОФИЛЬ (ЗДЕСЬ САМОЕ ВАЖНОЕ: ОТПРАВКА ВСЕХ КЕЙСОВ) ---
 app.get("/api/profile", requireSession, async (req, res) => {
   const { user_uuid, nickname } = res.locals.session;
   
-  // ЗАГРУЖАЕМ ВСЕ КЕЙСЫ
+  // ЗАГРУЖАЕМ ВСЕ КЕЙСЫ (и активные, и черновики для отладки)
   const casesDB = await db.all("SELECT * FROM cases"); 
   
   let progress = { daily: 0, monthly: 0 };
@@ -362,15 +365,9 @@ app.get("/api/profile", requireSession, async (req, res) => {
     };
   });
   
-  // --- ЛОГ ОТПРАВКИ ---
+  // --- ЛОГ ОТПРАВКИ (ЭТОТ ЛОГ ПОКАЖЕТ, ЧТО НОВЫЙ БЭКЕНД РАБОТАЕТ) ---
   console.log(`📤 [PROFILE] Sending ${cases.length} cases to frontend for ${nickname}.`);
-  if (cases.length > 0) {
-      console.log(`   Sample Case: Title="${cases[0].title}", Type="${cases[0].type}", Image="${cases[0].image}"`);
-  } else {
-      console.warn(`   ⚠️ WARNING: Cases list is EMPTY!`);
-  }
-  // --------------------
-
+  
   res.json({ success: true, profile: { uuid: user_uuid, nickname, balance, dailySum: progress.daily, monthlySum: progress.monthly, dailyStats: { deposited: progress.daily, opened: openedToday }, monthlyStats: { deposited: progress.monthly }, cases } });
 });
 

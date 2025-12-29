@@ -325,7 +325,27 @@ app.post("/api/auth/session", async (req, res) => {
         console.error("Auth stats loading failed:", e);
     }
     
-    res.json({ success: true, session_token: sessionToken, profile: { uuid, nickname, balance, dailySum: progress.daily, monthlySum: progress.monthly, cases: [] } });
+    // --- ЗАГРУЗКА КЕЙСОВ ДЛЯ ОТВЕТА (FIX) ---
+    const casesDB = await db.all("SELECT * FROM cases");
+    const todayKey = getRigaDayKey();
+    const monthKey = getRigaMonthKey();
+    const claims = await db.all(`SELECT case_id FROM case_claims WHERE user_uuid = ? AND (period_key = ? OR period_key = ?)`, uuid, todayKey, monthKey);
+    const claimedIds = new Set(claims.map((c: any) => c.case_id));
+
+    const cases = casesDB.map((cfg: any) => {
+        const current = cfg.type === "daily" ? progress.daily : progress.monthly;
+        return { 
+            ...cfg, 
+            threshold: cfg.threshold_eur,
+            image: cfg.image_url,
+            progress: current, 
+            available: current >= cfg.threshold_eur && !claimedIds.has(cfg.id), 
+            is_claimed: claimedIds.has(cfg.id) 
+        };
+    });
+    // ----------------------------------------
+    
+    res.json({ success: true, session_token: sessionToken, profile: { uuid, nickname, balance, dailySum: progress.daily, monthlySum: progress.monthly, cases } });
   } catch (e: any) { 
     res.status(401).json({ success: false, error: "Invalid credentials" }); 
   }

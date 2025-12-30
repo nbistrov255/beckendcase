@@ -58,14 +58,13 @@ async function gqlRequest<T>(query: string, variables: any = {}, token?: string)
   
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // Увеличил до 15 сек
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 сек
 
     const res = await fetch(url, { method: "POST", headers, body: JSON.stringify({ query, variables }), signal: controller.signal });
     clearTimeout(timeoutId);
 
     const text = await res.text();
     if (!res.ok) {
-        // console.error(`SmartShell HTTP ${res.status}`); 
         throw new Error(`SmartShell HTTP Error: ${res.status}`);
     }
     
@@ -109,7 +108,7 @@ async function getClientBalance(userUuid: string): Promise<number> {
     const client = data.clients?.data?.find(c => c.uuid === userUuid);
     return client ? (client.deposit || 0) : 0;
   } catch (e) {
-    return 0; // Тихо возвращаем 0, если таймаут
+    return 0;
   }
 }
 
@@ -365,7 +364,6 @@ app.post("/api/cases/open", requireSession, async (req, res) => {
     }
 });
 
-// ✅ НОВЫЙ ЭНДПОИНТ: ИСТОРИЯ ИГРЫ ПОЛЬЗОВАТЕЛЯ (для профиля)
 app.get("/api/user/history", requireSession, async (req, res) => {
     try {
         const history = await db.all("SELECT * FROM spins WHERE user_uuid = ? ORDER BY created_at DESC LIMIT 50", res.locals.session.user_uuid);
@@ -391,30 +389,65 @@ app.post("/api/inventory/sell", requireSession, async (req, res) => {
     res.json({ success: true, sold_amount: item.sell_price_eur });
 });
 
+// 🔥🔥🔥 НОВАЯ ВЕРСИЯ CLAIM (С ПОДРОБНЫМИ ЛОГАМИ) 🔥🔥🔥
 app.post("/api/inventory/claim", requireSession, async (req, res) => {
-    const { inventory_id } = req.body;
-    const { user_uuid, trade_link } = res.locals.session;
-    const item = await db.get("SELECT * FROM inventory WHERE id = ? AND user_uuid = ?", inventory_id, user_uuid);
-    if (!item || item.status !== 'available') return res.status(400).json({ error: "Item not available" });
-    
-    await db.run("BEGIN TRANSACTION");
-    if (item.type === 'money') {
-        const amount = item.amount_eur || item.price_eur || 0;
-        await addClientDeposit(user_uuid, amount);
-        await db.run("UPDATE inventory SET status = 'received', updated_at = ? WHERE id = ?", Date.now(), inventory_id);
+    console.log("📥 CLAIM REQUEST RECEIVED");
+    try {
+        const { inventory_id } = req.body;
+        const { user_uuid, trade_link } = res.locals.session;
+        
+        console.log(`👤 User: ${user_uuid}, Item: ${inventory_id}`);
+
+        const item = await db.get("SELECT * FROM inventory WHERE id = ? AND user_uuid = ?", inventory_id, user_uuid);
+        if (!item) {
+            console.error("❌ Item not found or not yours");
+            return res.status(400).json({ error: "Item not available" });
+        }
+        
+        if (item.status !== 'available') {
+             console.error(`❌ Item status is ${item.status}, expected 'available'`);
+             return res.status(400).json({ error: "Item not available" });
+        }
+        
+        // 1. Если это ДЕНЬГИ
+        if (item.type === 'money') {
+            console.log("💰 Auto-claiming money...");
+            const amount = item.amount_eur || item.price_eur || 0;
+            await addClientDeposit(user_uuid, amount);
+            await db.run("UPDATE inventory SET status = 'received', updated_at = ? WHERE id = ?", Date.now(), inventory_id);
+            console.log("✅ Money added");
+            return res.json({ success: true, type: 'money', message: `Added ${amount}€ to balance` });
+        }
+
+        // 2. Если это СКИН/ФИЗ
+        if ((item.type === 'skin' || !item.type) && !trade_link) {
+            console.error("❌ No trade link");
+            return res.status(400).json({ error: "TRADE_LINK_MISSING" });
+        }
+
+        const requestId = `REQ-${Math.floor(Math.random() * 1000000)}`;
+        console.log(`📝 Creating request ${requestId} for item "${item.title}"`);
+
+        await db.run("BEGIN TRANSACTION");
+        await db.run("UPDATE inventory SET status = 'processing', updated_at = ? WHERE id = ?", Date.now(), inventory_id);
+        
+        await db.run(`
+            INSERT INTO requests (id, user_uuid, inventory_id, item_title, type, status, created_at) 
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        `, requestId, user_uuid, inventory_id, item.title, item.type || 'skin', Date.now());
+        
         await db.run("COMMIT");
-        return res.json({ success: true, type: 'money', message: `Added ${amount}€ to balance` });
+        
+        console.log("✅ Request created successfully");
+        res.json({ success: true, type: 'item', requestId });
+
+    } catch (e: any) { 
+        console.error("🔥 CLAIM ERROR:", e);
+        await db.run("ROLLBACK"); 
+        res.status(500).json({ error: e.message }); 
     }
-    if (item.type === 'skin' && !trade_link) {
-        await db.run("ROLLBACK");
-        return res.status(400).json({ error: "TRADE_LINK_MISSING" });
-    }
-    const requestId = `REQ-${Math.floor(Math.random() * 1000000)}`;
-    await db.run("UPDATE inventory SET status = 'processing', updated_at = ? WHERE id = ?", Date.now(), inventory_id);
-    await db.run(`INSERT INTO requests (id, user_uuid, inventory_id, item_title, type, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`, requestId, user_uuid, inventory_id, item.title, item.type, Date.now());
-    await db.run("COMMIT");
-    res.json({ success: true, type: 'item', requestId });
 });
+// 🔥🔥🔥 КОНЕЦ НОВОЙ ФУНКЦИИ 🔥🔥🔥
 
 app.post("/api/user/tradelink", requireSession, async (req, res) => {
     await db.run(`INSERT INTO user_settings (user_uuid, trade_link) VALUES (?, ?) ON CONFLICT(user_uuid) DO UPDATE SET trade_link = excluded.trade_link`, res.locals.session.user_uuid, req.body.trade_link);

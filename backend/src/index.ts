@@ -58,14 +58,14 @@ async function gqlRequest<T>(query: string, variables: any = {}, token?: string)
   
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 сек
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // Увеличил до 15 сек
 
     const res = await fetch(url, { method: "POST", headers, body: JSON.stringify({ query, variables }), signal: controller.signal });
     clearTimeout(timeoutId);
 
     const text = await res.text();
     if (!res.ok) {
-        console.error(`SmartShell HTTP ${res.status}`);
+        // console.error(`SmartShell HTTP ${res.status}`); 
         throw new Error(`SmartShell HTTP Error: ${res.status}`);
     }
     
@@ -74,7 +74,6 @@ async function gqlRequest<T>(query: string, variables: any = {}, token?: string)
         if (json.errors) throw new Error(json.errors[0]?.message);
         return json.data;
     } catch (e) {
-        console.error("Invalid JSON:", text.slice(0, 100));
         throw new Error("Invalid JSON from SmartShell");
     }
   } catch (e: any) {
@@ -110,8 +109,7 @@ async function getClientBalance(userUuid: string): Promise<number> {
     const client = data.clients?.data?.find(c => c.uuid === userUuid);
     return client ? (client.deposit || 0) : 0;
   } catch (e) {
-    console.error(`⚠️ Balance failed, returning 0`);
-    return 0;
+    return 0; // Тихо возвращаем 0, если таймаут
   }
 }
 
@@ -316,7 +314,6 @@ app.get("/api/cases/:id", async (req, res) => {
     res.json({ success: true, case: caseData, contents });
 });
 
-// 🔥🔥🔥 ВОТ ТУТ БЫЛА ОШИБКА "Unknown Item" — Я ИСПРАВИЛ ЗАПРОС 🔥🔥🔥
 app.post("/api/cases/open", requireSession, async (req, res) => {
     try {
         const { user_uuid } = res.locals.session;
@@ -332,8 +329,6 @@ app.post("/api/cases/open", requireSession, async (req, res) => {
         const currentProgress = type.includes("daily") ? progress.daily : progress.monthly;
         if (currentProgress < caseMeta.threshold_eur) return res.status(403).json({ error: "Not enough deposit" });
 
-        // 🔥 ВНИМАНИЕ: Здесь я изменил SELECT, чтобы он точно брал i.title, i.image_url и т.д.
-        // Используем ТОЧНО ТАКОЙ ЖЕ запрос, как в GET /api/cases/:id, чтобы данные совпадали
         const caseItems = await db.all(`SELECT i.*, ci.weight, ci.rarity as drop_rarity FROM case_items ci JOIN items i ON ci.item_id = i.id WHERE ci.case_id = ?`, caseId);
         
         if (caseItems.length === 0) return res.status(500).json({ error: "Case empty" });
@@ -342,7 +337,6 @@ app.post("/api/cases/open", requireSession, async (req, res) => {
         const selected = caseItems.find((i: any) => (rnd -= i.weight) <= 0) || caseItems[0];
         const xpEarned = caseMeta.threshold_eur || 5; 
         
-        // ЛОГ ВЫИГРЫША (Смотри в консоль сервера!)
         console.log(`🎰 WINNER SELECTED: ${selected.title} (ID: ${selected.id})`);
 
         await db.run("BEGIN TRANSACTION");
@@ -352,13 +346,12 @@ app.post("/api/cases/open", requireSession, async (req, res) => {
         await db.run(`INSERT INTO inventory (user_uuid, item_id, title, type, image_url, amount_eur, sell_price_eur, rarity, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'available', ?, ?)`, user_uuid, selected.id, selected.title, selected.type, selected.image_url, selected.price_eur, selected.sell_price_eur, selected.drop_rarity || selected.rarity, Date.now(), Date.now());
         await db.run("COMMIT");
 
-        // Отправляем правильные поля для фронтенда
         res.json({ 
             success: true, 
             item: { 
                 id: selected.id, 
-                name: selected.title,  // <-- Вот это поле берется с сайта
-                title: selected.title, // <-- Дублируем на всякий случай
+                name: selected.title, 
+                title: selected.title,
                 type: selected.type, 
                 image: selected.image_url, 
                 rarity: selected.drop_rarity || selected.rarity 
@@ -371,7 +364,16 @@ app.post("/api/cases/open", requireSession, async (req, res) => {
         res.status(500).json({ error: e.message }); 
     }
 });
-// 🔥🔥🔥 КОНЕЦ ИСПРАВЛЕНИЯ 🔥🔥🔥
+
+// ✅ НОВЫЙ ЭНДПОИНТ: ИСТОРИЯ ИГРЫ ПОЛЬЗОВАТЕЛЯ (для профиля)
+app.get("/api/user/history", requireSession, async (req, res) => {
+    try {
+        const history = await db.all("SELECT * FROM spins WHERE user_uuid = ? ORDER BY created_at DESC LIMIT 50", res.locals.session.user_uuid);
+        res.json({ success: true, history });
+    } catch (e) {
+        res.json({ success: false, history: [] });
+    }
+});
 
 app.get("/api/inventory", requireSession, async (req, res) => {
     const items = await db.all("SELECT * FROM inventory WHERE user_uuid = ? AND status IN ('available', 'processing') ORDER BY created_at DESC", res.locals.session.user_uuid);
